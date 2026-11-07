@@ -73,6 +73,7 @@ def import_model(path):
 
 def normalise(body, a):
     if a.yaw:
+        body.rotation_mode = "XYZ"
         body.rotation_euler.z = math.radians(a.yaw)
         bpy.ops.object.transform_apply(rotation=True)
     n_faces = len(body.data.polygons)

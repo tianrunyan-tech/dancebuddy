@@ -19,6 +19,12 @@ torso, every leg move is translated (the character has no legs) and the body gro
 the dancer's moves are SHOWN on this body, unit by unit, by setting a plan.
 
 How to work:
+0. Only if you are asked for a NEW character: make it first with the character tools. Create it from what you
+   were given (create_character_from_text / create_character_from_image); if it is a plush, blob or other soft body,
+   segment_character it, then import_and_rig_soft the segmented GLB and check that its arms were found (else try
+   `yaw` or another segmentation granularity). A humanoid or an animal with real legs can only be rig_humanoid'ed:
+   say that the dance needs a soft-rigged body and stop. Each Tripo call takes minutes and costs credits: never
+   repeat one that succeeded. The character you rig is the one you then dance with.
 1. Read the dance (get_dance_score, get_dance_signals, get_leg_events) and the character (get_character_spec).
    Note what each unit is about: arms, footwork, head and hair flips, turns.
 2. Read the plan format (get_plan_format). Every knob defaults to the plain copy.
@@ -50,19 +56,24 @@ How to work:
 def run_agent(kp: dict, score: dict, rig: dict, spec: dict, out_dir: str | Path, max_attempts: int = 4,
               max_turns: int = 24, model: str | None = None, blend: str | None = None,
               source: str | None = None, max_looks: int = 4, use_looks: bool = True, use_geometry: bool = True,
-              use_moves: bool = True) -> dict:
+              use_moves: bool = True, new_character: str | None = None, character_request: str = "",
+              tripo=None) -> dict:
     """Run the agent on one dance. blend: the rigged character (geometry check, looks); source: the dance video
     (looks). use_looks / use_geometry / use_moves switch a capability off (ablations): its tool is not offered and
-    the agent is told. Writes trace.json, summary.json, the best plan / curves / checks and every attempt."""
+    the agent is told. new_character: the agent first makes a character with this name (from character_request)
+    and then dances with it; rig may be None. Writes trace.json, summary.json, the best plan / curves / checks and
+    every attempt."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     box = Toolbox(kp, score, rig, spec, out, blend=blend, source=source, model=model, max_attempts=max_attempts,
-                  max_looks=max_looks, use_looks=use_looks, use_geometry=use_geometry, use_moves=use_moves)
+                  max_looks=max_looks, use_looks=use_looks, use_geometry=use_geometry, use_moves=use_moves,
+                  new_character=new_character, tripo=tripo)
     missing = box.missing()
     note = f" In this run you do not have {', '.join(missing)}; skip those steps." if missing else ""
-    messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": "Make the character dance this dance. Start by reading the dance and the "
-                                            "character." + note}]
+    ask = ("Make the character dance this dance. Start by reading the dance and the character." if not new_character
+           else f"Make a new character ({character_request}) and then make it dance this dance. Start by making "
+                "the character.")
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": ask + note}]
     final_text = ""
     calls_made, cost = 0, 0.0
     for _ in range(max_turns):
@@ -97,7 +108,8 @@ def run_agent(kp: dict, score: dict, rig: dict, spec: dict, out_dir: str | Path,
                             "problems": sum(len(u["problems"]) for u in x["result"]["units"])} for x in attempts],
                "looks": [{"attempt": x["attempt"], "frames": x["frames"], "picture": x["picture"]} for x in looks],
                "final_message": final_text, "model": model or llm.DEFAULT_MODEL,
-               "capabilities": box.use, "llm_calls": calls_made + len(looks),
+               "capabilities": box.use, "character": str(box.char_prefix) if box.char_prefix else None,
+               "character_steps": box.charbox.made if box.charbox else [], "llm_calls": calls_made + len(looks),
                "cost_usd": round(cost + sum(x.get("cost_usd", 0.0) for x in looks), 4)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     print(f"agent: {len(attempts)} attempt(s), best = {best['attempt']}, passed = {best['result']['passed']}")

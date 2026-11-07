@@ -6,6 +6,10 @@
   act       submit_plan: the plan is carried out (executor) and checked in numbers (critics.numbers)
   check     check_arm_geometry: the posed rig, no rendering     (critics.inspect)
             look_at_frames: frames rendered next to the dancer, reviewed by a vision model (critics.inspect)
+  character create_character_from_text, create_character_from_image, segment_character, rig_humanoid (Tripo),
+            import_and_rig_soft (local)                          (characters.make)
+            offered only when the run is asked for a new character; the character the agent rigs becomes the one
+            it dances with
 
 A Toolbox holds one run's state (its attempts and looks) and can switch tools off for ablations.
 """
@@ -20,9 +24,11 @@ from jsonschema import Draft202012Validator
 from dancebuddy import llm
 from dancebuddy.actions import moves as moves_mod
 from dancebuddy.actions.plan import EMPHASIS_MOVES, KNOBS, PLAN_SCHEMA, default_plan
+from dancebuddy.characters.make import CHARACTER_SPECS, ROOT, CharacterTools
 from dancebuddy.critics.inspect import check_arm_geometry, look_at_frames, pick_frames
 from dancebuddy.critics.numbers import check_curves
 from dancebuddy.executor.retarget import retarget
+from dancebuddy.knowledge import character as character_kb
 from dancebuddy.perception.signals import compute_signals, unit_activity
 
 FRAMES_ARGS = {"type": "object", "properties": {"attempt": {"type": "integer"}, "unit_id": {"type": "integer"},
@@ -74,22 +80,41 @@ def score_view(score: dict) -> dict:
 class Toolbox:
     """One run's tools. blend: the rigged character (geometry check, looks); source: the dance video (looks)."""
 
-    def __init__(self, kp: dict, score: dict, rig: dict, spec: dict, out: Path, *, blend: str | None = None,
-                 source: str | None = None, model: str | None = None, max_attempts: int = 4, max_looks: int = 4,
-                 use_looks: bool = True, use_geometry: bool = True, use_moves: bool = True):
-        self.kp, self.score, self.rig, self.spec, self.out = kp, score, rig, spec, Path(out)
-        self.blend, self.source, self.model = blend, source, model
+    def __init__(self, kp: dict, score: dict, rig: dict | None, spec: dict | None, out: Path, *,
+                 blend: str | None = None, source: str | None = None, model: str | None = None,
+                 max_attempts: int = 4, max_looks: int = 4, use_looks: bool = True, use_geometry: bool = True,
+                 use_moves: bool = True, new_character: str | None = None, tripo=None):
+        self.kp, self.score, self.out = kp, score, Path(out)
+        self.source, self.model = source, model
         self.max_attempts, self.max_looks = max_attempts, max_looks
         self.use = {"looks": use_looks, "geometry": use_geometry, "moves": use_moves}
         self.validator = Draft202012Validator(PLAN_SCHEMA)
         self.signals = compute_signals(kp)
-        self.events = retarget(kp, rig, signals=self.signals, beats=score["beats"], score=score)["leg_events"]
+        self.charbox = CharacterTools(new_character, self.out / "character", tripo) if new_character else None
+        self.char_prefix = None
+        self.rig = self.spec = self.blend = None
+        self.events: list = []
         self.attempts: list[dict] = []
         self.looks: list[dict] = []
+        if rig is not None:
+            self._use_character(rig, spec or {}, blend)
+
+    def _use_character(self, rig: dict, spec: dict, blend: str | None) -> None:
+        """Dance with this character from now on (plans made for another body no longer apply)."""
+        self.rig, self.spec, self.blend = rig, spec, blend
+        self.events = retarget(self.kp, rig, signals=self.signals, beats=self.score["beats"],
+                               score=self.score)["leg_events"]
+        self.attempts, self.looks = [], []
+
+    def set_character(self, prefix: str | Path) -> None:
+        prefix = Path(prefix)
+        self.char_prefix = prefix
+        self._use_character(character_kb.rig(prefix), character_kb.spec(prefix), character_kb.blend(prefix))
 
     def specs(self) -> list[dict]:
         off = {"look_at_frames": not self.use["looks"], "check_arm_geometry": not self.use["geometry"]}
-        return [s for name, s in SPECS.items() if not off.get(name, False)]
+        dance = [s for name, s in SPECS.items() if not off.get(name, False)]
+        return (self.charbox.specs() if self.charbox else []) + dance
 
     def missing(self) -> list[str]:
         return [n for n, k in (("looking at rendered frames", "looks"), ("the arm geometry check", "geometry"),
@@ -97,8 +122,17 @@ class Toolbox:
 
     def call(self, name: str, args: dict) -> str:
         fn = getattr(self, "t_" + name, None)
-        if fn is None or name not in {s["function"]["name"] for s in self.specs()}:
+        if name not in {s["function"]["name"] for s in self.specs()}:
             return json.dumps({"error": f"unknown tool {name}"})
+        if name in CHARACTER_SPECS:
+            res = json.loads(self.charbox.call(name, args))
+            if name == "import_and_rig_soft" and "character" in res:
+                self.set_character(ROOT / res["character"])
+                res["note"] = ("this is now the character you dance with: read its spec and plan the dance"
+                               + ("" if res.get("arms_found") else "; its arms were NOT found, fix that first"))
+            return json.dumps(res)
+        if self.rig is None and name not in ("get_dance_score", "get_dance_signals", "get_plan_format"):
+            return json.dumps({"error": "there is no character yet: make one with the character tools first"})
         return json.dumps(fn(args))
 
     # ---- read

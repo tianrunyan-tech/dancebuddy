@@ -154,7 +154,33 @@ def body_turn(kp: dict, T: np.ndarray) -> np.ndarray:
     g = np.clip(mag / BODY["turn_quiet_deg"], 0, 1)
     mag = mag * g * g * (3 - 2 * g)                           # soft dead zone near facing the camera
     sign = np.sign(smooth(T[:, 1, 0], 0.1 * fps) + 1e-9)      # which shoulder is farther from the camera
-    return smooth(mag * sign, 0.05 * fps)
+    # the depth sign flips on back views, so only read it near facing the camera and hold it through the turn
+    n = len(mag)
+    held = sign.copy()
+    for i in range(1, n):
+        if mag[i] > 60.0 and mag[i - 1] > 20.0:
+            held[i] = held[i - 1]
+    turn = mag * held
+    # full spin: she comes back to the front from the other side, so keep turning past 180
+    offset, i = 0.0, 0
+    while i < n:
+        if mag[i] > 60.0:
+            j = i
+            while j < n and mag[j] > 60.0:
+                j += 1
+            s_in = held[i]
+            peak = i + int(np.argmax(mag[i:j]))
+            if j < n and sign[j] != s_in and mag[peak] >= 100.0:
+                turn[i:peak] += offset
+                turn[peak:j] = s_in * (360.0 - mag[peak:j]) + offset
+                offset += s_in * 360.0
+            else:
+                turn[i:j] += offset
+            i = j
+        else:
+            turn[i] += offset
+            i += 1
+    return smooth(turn, 0.05 * fps)
 
 
 def hip_tilt(kp: dict, aspect: float) -> np.ndarray:
@@ -437,7 +463,10 @@ def retarget(kp: dict, rig: dict, signals: dict | None = None, beats: list[int] 
         lean.append(np.degrees(np.arctan2(-z[1], z[2])))      # + = forward (toward the camera, -Y)
     side = smooth(np.array(side), 1.0) * knob["body"] + legs["tilt"] + emph["tilt"] + mv["body"]["tilt"]
     lean = soft_limit(smooth(np.array(lean), 1.0) * knob["body"] + mv["body"]["lean"], BODY["lean_max"])
-    turn = soft_limit(turn * knob["body"] + emph["twist"] + mv["body"]["turn"], BODY["turn_max"])
+    if BODY["turn_max"] >= 180.0:  # can spin all the way round: scale only small turns
+        turn = turn + (knob["body"] - 1.0) * soft_limit(turn, 60.0) + emph["twist"] + mv["body"]["turn"]
+    else:
+        turn = soft_limit(turn * knob["body"] + emph["twist"] + mv["body"]["turn"], BODY["turn_max"])
 
     # arm directions (image-based in the picture plane), in Blender axes
     aspect = image_aspect(kp)
@@ -594,6 +623,18 @@ def retarget(kp: dict, rig: dict, signals: dict | None = None, beats: list[int] 
             fist[i] = fist_amount(u, f)
             if not np.isnan(am["fist"][i]):
                 fist[i] = am["fist"][i]
+        # palm and back are equivalent, so keep the hand roll continuous (mod pi) instead of flipping
+        bb = ch[f"{name}.bbone"]
+        if bb:
+            r = np.array([c[5] for c in bb], float)
+            for i in range(1, n):
+                r[i] -= np.pi * np.round((r[i] - r[i - 1]) / np.pi)
+            # a big twist pinches a raised arm, so fade it out above the shoulder
+            up = np.array([raise_deg(_norm(u)) for u, _ in raw])
+            keep = np.clip((150.0 - up) / 50.0, 0.0, 1.0)
+            r = smooth(np.clip(r, -np.radians(120), np.radians(120)) * smooth(keep, 0.1 * fps), 0.05 * fps)
+            for i in range(n):
+                bb[i][5] = round(float(r[i]), 5)
         if f"fist_{side_name}" in rig.get("shape_keys", {}):
             ch[f"{name}.fist"] = [round(float(x), 3) for x in np.clip(smooth(fist, 0.05 * fps), 0, 1)]
 

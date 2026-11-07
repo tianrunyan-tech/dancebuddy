@@ -5,6 +5,7 @@
 Per dance:
   python -m dancebuddy perceive VIDEO runs/my          # perception: pose -> keypoints + dance score
   python -m dancebuddy agent    runs/my                # the agent: read, plan, act, check, look, revise
+  python -m dancebuddy agent    runs/my --new-character blob --image PIC   # ...after making the character (Tripo)
   python -m dancebuddy render   runs/my                # executor: render the agent's result (Cycles, 30 fps)
   python -m dancebuddy compose  runs/my                # dancer | agent side by side
   python -m dancebuddy demo     VIDEO runs/my          # all of the above, in order
@@ -86,10 +87,26 @@ def cmd_agent(a):
     run_dir = Path(a.run)
     score = json.loads((run_dir / "dance_score.json").read_text())
     source = (run_dir / "source.txt").read_text().strip() if (run_dir / "source.txt").exists() else score.get("source")
-    run_agent(load_keypoints(run_dir / "keypoints.npz"), score, character.rig(a.char), character.spec(a.char),
-              run_dir / a.name, max_attempts=a.attempts, model=a.model, blend=character.blend(a.char),
+    request, new = "", a.new_character
+    if new:
+        if "_" in new:
+            raise SystemExit("--new-character name must not contain '_'")
+        if a.image:
+            request = f"from the picture {Path(a.image).expanduser().resolve()}"
+        elif a.views:
+            request = "from these views: " + ", ".join(
+                f"{v.split('=', 1)[0]}={Path(v.split('=', 1)[1]).expanduser().resolve()}" for v in a.views)
+        elif a.prompt:
+            request = f"described as: {a.prompt}"
+        else:
+            raise SystemExit("--new-character needs --prompt, --image or --views")
+    rig = None if new else character.rig(a.char)
+    run_agent(load_keypoints(run_dir / "keypoints.npz"), score, rig, None if new else character.spec(a.char),
+              run_dir / a.name, max_attempts=a.attempts, model=a.model,
+              blend=None if new else character.blend(a.char),
               source=source if source and Path(source).exists() else None, max_looks=a.looks,
-              use_looks=not a.no_looks, use_geometry=not a.no_geometry, use_moves=not a.no_moves)
+              use_looks=not a.no_looks, use_geometry=not a.no_geometry, use_moves=not a.no_moves,
+              new_character=new, character_request=request)
 
 
 def cmd_replay(a):
@@ -191,6 +208,9 @@ def main(argv=None):
     s.add_argument("--no-looks", action="store_true", help="ablation: no looking at rendered frames")
     s.add_argument("--no-geometry", action="store_true", help="ablation: no arm geometry check")
     s.add_argument("--no-moves", action="store_true", help="ablation: knobs only, no own moves")
+    s.add_argument("--new-character", metavar="NAME", help="first make a new character (Tripo) and dance with it")
+    s.add_argument("--prompt", help="new character: a description"); s.add_argument("--image", help="new character: a picture")
+    s.add_argument("--views", nargs="+", help="new character: side=path, e.g. front=f.png left=l.png")
     s = add(sub, "replay", cmd_replay, "run", "plan"); char_opt(s); s.add_argument("--name", default="replay")
     s = add(sub, "render", cmd_render, "run"); char_opt(s); render_opts(s)
     s.add_argument("--systems", nargs="+", default=["agent"]); s.add_argument("--max-frames", type=int, default=0)

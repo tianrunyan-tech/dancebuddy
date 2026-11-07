@@ -21,7 +21,8 @@ def rig(char: Path) -> dict:
 
 
 def spec(char: Path) -> dict:
-    p = Path(str(char).split("_")[0] + "_motion_spec.json")
+    char = Path(char)
+    p = char.parent / (char.name.split("_")[0] + "_motion_spec.json")
     return json.loads(p.read_text()) if p.exists() else {}
 
 

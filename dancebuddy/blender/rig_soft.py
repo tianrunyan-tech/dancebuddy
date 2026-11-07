@@ -73,16 +73,44 @@ def base_colour_image(body):
     raise SystemExit("no base-colour texture found on Body")
 
 
-def vertex_hsv(body, vuv, size=1024):
-    img = base_colour_image(body).copy()
+def material_image(mat):
+    if mat and mat.node_tree:
+        for node in mat.node_tree.nodes:
+            if node.type == "BSDF_PRINCIPLED":
+                links = node.inputs["Base Color"].links
+                if links and links[0].from_node.type == "TEX_IMAGE":
+                    return links[0].from_node.image
+    return None
+
+
+def _image_pixels(image, size):
+    img = image.copy()
     img.scale(size, size)
     px = np.zeros(size * size * 4, np.float32)
     img.pixels.foreach_get(px)
-    px = px.reshape(size, size, 4)
     bpy.data.images.remove(img)
+    return px.reshape(size, size, 4)
+
+
+def vertex_hsv(body, vuv, size=1024):
+    # segmented models have one material (and texture) per part
+    me = body.data
+    nv = len(me.vertices)
+    vmat = np.zeros(nv, int)
+    for p in me.polygons:
+        for vi in p.vertices:
+            vmat[vi] = p.material_index
     x = np.clip((vuv[:, 0] % 1) * (size - 1), 0, size - 1).astype(int)
     y = np.clip((vuv[:, 1] % 1) * (size - 1), 0, size - 1).astype(int)
-    rgb = np.clip(px[y, x, :3], 0, 1)
+    rgb = np.zeros((nv, 3), np.float32)
+    fallback = base_colour_image(body)
+    for mi, mat in enumerate(me.materials):
+        sel = vmat == mi
+        if not sel.any():
+            continue
+        px = _image_pixels(material_image(mat) or fallback, size)
+        rgb[sel] = px[y[sel], x[sel], :3]
+    rgb = np.clip(rgb, 0, 1)
     mx, mn = rgb.max(1), rgb.min(1)
     d = mx - mn + 1e-9
     r, g, b = rgb.T
